@@ -1,5 +1,4 @@
 @echo off
-chcp 65001 > nul
 title Instalador Automatico - Hostal Keymar
 color 0A
 cd /d "%~dp0"
@@ -18,25 +17,24 @@ set "REPO_URL=https://github.com/eduardocalaniguevara-del/app_local_keymar.git"
 :: -------------------------------------------------------------------
 :: 1. VERIFICAR O INSTALAR PYTHON
 :: -------------------------------------------------------------------
-echo [1/6] Verificando instalacion de Python...
+echo [1/6] Verificando instalacion real de Python (ignorando alias de tienda Windows)...
 set "PY_CMD="
-where python >nul 2>&1 && set "PY_CMD=python"
-if "%PY_CMD%"=="" (
-    where py >nul 2>&1 && set "PY_CMD=py"
-)
-if "%PY_CMD%"=="" (
-    if exist "%LocalAppData%\Programs\Python\Python311\python.exe" set "PY_CMD=%LocalAppData%\Programs\Python\Python311\python.exe"
-    if exist "%LocalAppData%\Programs\Python\Python312\python.exe" set "PY_CMD=%LocalAppData%\Programs\Python\Python312\python.exe"
-    if exist "C:\Python311\python.exe" set "PY_CMD=C:\Python311\python.exe"
-)
+if exist "%LocalAppData%\Programs\Python\Python312\python.exe" set "PY_CMD=%LocalAppData%\Programs\Python\Python312\python.exe"
+if exist "%LocalAppData%\Programs\Python\Python311\python.exe" set "PY_CMD=%LocalAppData%\Programs\Python\Python311\python.exe"
+if exist "%LocalAppData%\Programs\Python\Python313\python.exe" set "PY_CMD=%LocalAppData%\Programs\Python\Python313\python.exe"
+if exist "C:\Python312\python.exe" set "PY_CMD=C:\Python312\python.exe"
+if exist "C:\Python311\python.exe" set "PY_CMD=C:\Python311\python.exe"
+if exist "C:\Program Files\Python312\python.exe" set "PY_CMD=C:\Program Files\Python312\python.exe"
+if exist "C:\Program Files\Python311\python.exe" set "PY_CMD=C:\Program Files\Python311\python.exe"
 
 if "%PY_CMD%"=="" (
-    echo [AVISO] Python no detectado. Descargando e instalando Python 3.11 oficial...
-    powershell -NoProfile -Command "$installer = \"$env:TEMP\python_installer.exe\"; Write-Host 'Descargando instalador...'; Invoke-WebRequest -Uri 'https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe' -OutFile $installer; Write-Host 'Instalando silenciosamente (puede demorar 1-2 minutos)...'; Start-Process -FilePath $installer -ArgumentList '/quiet InstallAllUsers=0 PrependPath=1 Include_pip=1' -Wait; Remove-Item -Path $installer -Force -ErrorAction SilentlyContinue"
-    
-    :: Actualizar variables de entorno para esta ventana
-    set "PATH=%LocalAppData%\Programs\Python\Python311;%LocalAppData%\Programs\Python\Python311\Scripts;%PATH%"
-    set "PY_CMD=python"
+    echo [AVISO] Python no instalado. Descargando e instalando Python 3.12 con curl (bajo uso de memoria)...
+    curl.exe -L -o "%TEMP%\python_installer.exe" "https://www.python.org/ftp/python/3.12.8/python-3.12.8-amd64.exe"
+    if exist "%TEMP%\python_installer.exe" (
+        "%TEMP%\python_installer.exe" /quiet InstallAllUsers=0 PrependPath=1 Include_test=0 Include_pip=1
+        del /f /q "%TEMP%\python_installer.exe" >nul 2>&1
+    )
+    if exist "%LocalAppData%\Programs\Python\Python312\python.exe" set "PY_CMD=%LocalAppData%\Programs\Python\Python312\python.exe"
 )
 echo [OK] Python listo.
 
