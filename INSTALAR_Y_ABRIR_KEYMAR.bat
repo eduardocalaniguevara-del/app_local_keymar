@@ -74,7 +74,7 @@ echo [5/5] Instalando librerias y creando icono en Escritorio...
 "%PY_EXE%" -m pip install --upgrade pip --quiet > nul 2>&1
 "%PY_EXE%" -m pip install fastapi uvicorn pydantic gspread google-api-python-client google-auth httpx requests --quiet
 
-powershell -NoProfile -Command "$ws = New-Object -ComObject WScript.Shell; foreach ($d in @([Environment]::GetFolderPath('Desktop'), \"$env:USERPROFILE\OneDrive\Desktop\")) { if (Test-Path $d) { $s = $ws.CreateShortcut(\"$d\Recepcion Hostal Keymar (Local).lnk\"); $s.TargetPath = '%DEST_DIR%\Iniciar_Recepcion_Local.bat'; $s.WorkingDirectory = '%DEST_DIR%'; if (Test-Path 'C:\Program Files\Google\Chrome\Application\chrome.exe') { $s.IconLocation = 'C:\Program Files\Google\Chrome\Application\chrome.exe,0' }; $s.Save() } }"
+powershell -NoProfile -Command "$ws = New-Object -ComObject WScript.Shell; foreach ($d in @([Environment]::GetFolderPath('Desktop'), \"$env:USERPROFILE\Desktop\", \"$env:USERPROFILE\OneDrive\Desktop\") | Select-Object -Unique) { if ($d -and (Test-Path $d)) { $s = $ws.CreateShortcut(\"$d\Recepcion Hostal Keymar (Local).lnk\"); $s.TargetPath = '%DEST_DIR%\Iniciar_Recepcion_Local.bat'; $s.WorkingDirectory = '%DEST_DIR%'; if (Test-Path 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe') { $s.IconLocation = 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe,0' } elseif (Test-Path 'C:\Program Files\Google\Chrome\Application\chrome.exe') { $s.IconLocation = 'C:\Program Files\Google\Chrome\Application\chrome.exe,0' }; $s.Save(); Copy-Item '%DEST_DIR%\Iniciar_Recepcion_Local.bat' \"$d\Abrir_Hostal_Keymar.bat\" -Force } }"
 
 echo.
 echo ====================================================================

@@ -98,7 +98,7 @@ echo [6/6] Verificando dependencias de Python y creando acceso directo...
 %PY_CMD% -m pip install fastapi uvicorn pydantic requests gspread google-api-python-client google-auth --quiet
 
 :: Crear acceso directo en el Escritorio
-powershell -NoProfile -Command "$ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut([Environment]::GetFolderPath('Desktop') + '\Recepcion Hostal Keymar.lnk'); $s.TargetPath = '%DEST_DIR%\Iniciar_Recepcion_Local.bat'; $s.WorkingDirectory = '%DEST_DIR%'; $s.Save()"
+powershell -NoProfile -Command "$ws = New-Object -ComObject WScript.Shell; foreach ($d in @([Environment]::GetFolderPath('Desktop'), \"$env:USERPROFILE\Desktop\", \"$env:USERPROFILE\OneDrive\Desktop\") | Select-Object -Unique) { if ($d -and (Test-Path $d)) { $s = $ws.CreateShortcut(\"$d\Recepcion Hostal Keymar (Local).lnk\"); $s.TargetPath = '%DEST_DIR%\Iniciar_Recepcion_Local.bat'; $s.WorkingDirectory = '%DEST_DIR%'; if (Test-Path 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe') { $s.IconLocation = 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe,0' } elseif (Test-Path 'C:\Program Files\Google\Chrome\Application\chrome.exe') { $s.IconLocation = 'C:\Program Files\Google\Chrome\Application\chrome.exe,0' }; $s.Save(); Copy-Item '%DEST_DIR%\Iniciar_Recepcion_Local.bat' \"$d\Abrir_Hostal_Keymar.bat\" -Force } }"
 echo [OK] Acceso directo 'Recepcion Hostal Keymar' creado en el Escritorio.
 
 echo.
