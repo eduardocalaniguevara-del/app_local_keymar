@@ -988,12 +988,9 @@ def obtener_datos_panel_local(fecha_override: Optional[str] = None) -> Dict[str,
                 adic_comp_est = float(st["adicComp"] or 0)
                 pagado_est = float(st["pagado"] or 0)
                 emp_est = str(st.get("empresa") or "").strip()
-                if es_empresa_corporativa(emp_est) and saldo_real_est > 0:
-                    tot_adic_est = snacks_carg + serv_carg + adic_comp_est
-                    adic_pend = max(0.0, round(tot_adic_est - pagado_est, 2))
-                    saldo = min(saldo_real_est, adic_pend)
-                else:
-                    saldo = saldo_real_est
+                # Regla Cero Omisiones: La deuda real se muestra SIEMPRE en la tarjeta,
+                # sin ocultar el saldo de hospedaje por tener empresa registrada.
+                saldo = saldo_real_est
 
                 deuda_ant = float(st["deudaAnt"] or 0)
                 continuo = bool(st["continuoEstancia"])
