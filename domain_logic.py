@@ -305,6 +305,82 @@ def cargar_indices_facturacion_memoria(conn) -> Dict[str, Any]:
     }
 
 
+def resolver_cadena_estancias_pendientes(
+    cur_r: Any,
+    by_uuid: Dict[str, Any],
+    by_hab: Dict[str, List[Any]],
+    idx_fact: Dict[str, Any]
+) -> Tuple[str, float, bool]:
+    """
+    Rastrea hacia atrás las estancias continuadas no emitidas del mismo huésped y habitación.
+    Retorna (f_in_mas_antigua_no_emitida, monto_fact_heredado, parent_emitido).
+    Si una estancia anterior ya tiene comprobante emitido, la acumulación se detiene allí.
+    """
+    f_in_cur = normalizar_fecha_dmy(cur_r["fecha_in_dmy"])
+    f_in_mas_antigua = f_in_cur
+    monto_fact_heredado = float(cur_r["monto_factura"] or 0)
+    curr = cur_r
+    visitados = set()
+    parent_emitido = False
+
+    while True:
+        u = str(curr["estancia_uuid"] or "").strip()
+        if u:
+            if u in visitados:
+                break
+            visitados.add(u)
+
+        p = None
+        p_uuid = str(curr["parent_uuid"] or "").strip()
+        if p_uuid and p_uuid in by_uuid:
+            p = by_uuid[p_uuid]
+        else:
+            hab = str(curr["hab"] or "").strip()
+            ymd_in = int(curr["ymd_in"] or 0)
+            dni = curr["dni"]
+            nom = curr["huesped"]
+            deuda_ant = float(curr["deuda_anterior"] or 0)
+            for cand in by_hab.get(hab, []):
+                if cand["estancia_uuid"] == curr["estancia_uuid"]:
+                    continue
+                c_ymd_in = int(cand["ymd_in"] or 0)
+                c_ymd_out = int(cand["ymd_out"] or 0)
+                if c_ymd_in >= ymd_in and c_ymd_out > ymd_in:
+                    continue
+                if son_mismo_huesped(dni, nom, cand["dni"], cand["huesped"]):
+                    if "contin" in str(cand["estado_estancia"] or "").lower() or deuda_ant > 0:
+                        p = cand
+                        break
+
+        if not p:
+            break
+
+        p_est_comp = str(p["estado_comp"] or "").strip().lower()
+        p_nro_comp = str(p["nro_comp"] or "").strip()
+        p_fila = int(p["sheet_row"] or 0)
+        p_calzado = idx_fact.get("calzadoPorFila", {}).get(f"E{p_fila}")
+
+        es_p_emitido = bool(
+            p_est_comp.startswith("emitid")
+            or p_nro_comp != ""
+            or (p_calzado and float(p_calzado.get("montoSunat") or 0) > 0)
+        )
+
+        if es_p_emitido:
+            parent_emitido = True
+            break
+
+        f_p_in = normalizar_fecha_dmy(p["fecha_in_dmy"])
+        if f_p_in:
+            f_in_mas_antigua = f_p_in
+        if monto_fact_heredado == 0:
+            monto_fact_heredado = float(p["monto_factura"] or 0)
+
+        curr = p
+
+    return f_in_mas_antigua, monto_fact_heredado, parent_emitido
+
+
 def resolver_facturacion_estancia(stay: Dict[str, Any], idx_fact: Dict[str, Any]) -> Dict[str, Any]:
     hab = str(stay.get("hab") or "").strip().upper()
     check_in = str(stay.get("checkIn") or "")
@@ -354,10 +430,23 @@ def resolver_facturacion_estancia(stay: Dict[str, Any], idx_fact: Dict[str, Any]
 
     pago_yape = float(stay.get("pagoYape") or 0)
     monto_fact_bd = float(stay.get("montoFactBD") or 0)
+    m_fact_pactado = float(stay.get("mFactPactado") or 0)
     adic_comp = float(stay.get("adicComp") or 0)
     tarifa_noche = float(stay.get("tarifa") or 0)
     noches = max(1, int(stay.get("noches") or 1))
-    subtotal_aloj = float(stay.get("subtotalAloj") or (noches * tarifa_noche))
+
+    f_in_pend = str(stay.get("fInPendiente") or "")
+    check_out = str(stay.get("checkOut") or "")
+    if f_in_pend and f_in_pend != check_in and check_out:
+        noches_fact = max(noches, calcular_noches(f_in_pend, check_out))
+    else:
+        noches_fact = noches
+
+    tarifa_diaria_fact = (
+        monto_fact_bd if monto_fact_bd > 0
+        else (m_fact_pactado if m_fact_pactado > 0 else tarifa_noche)
+    )
+    subtotal_aloj = round(noches_fact * tarifa_diaria_fact, 2)
     snacks = float(stay.get("snacks") or 0)
     servicios = float(stay.get("servicios") or 0)
     estado_comp_bd = str(stay.get("estadoCompBD") or "").strip()
@@ -475,14 +564,13 @@ def resolver_facturacion_estancia(stay: Dict[str, Any], idx_fact: Dict[str, Any]
             monto_facturado = monto_fact_bd if monto_fact_bd > 0 else 0.0
 
     monto_acordado_total = round(subtotal_aloj + adic_comp + snacks + servicios, 2)
-    if monto_fact_bd > 0:
+    if monto_fact_bd > 0 and monto_fact_bd > subtotal_aloj:
         monto_por_facturar = monto_fact_bd
-    elif calzado:
+    elif calzado and (float(calzado.get("montoSunat") or 0) > 0 or float(calzado.get("montoAJ") or 0) > 0):
         monto_por_facturar = (
-            float(calzado.get("montoAJ") or 0)
-            or float(calzado.get("yapeBcp") or 0)
-            or float(calzado.get("yapeAB") or 0)
-            or (pago_yape if pago_yape > 0 else monto_acordado_total)
+            float(calzado.get("montoSunat") or 0)
+            or float(calzado.get("montoAJ") or 0)
+            or monto_acordado_total
         )
     else:
         monto_por_facturar = monto_acordado_total if es_factura else (pago_yape if pago_yape > 0 else monto_acordado_total)
@@ -501,11 +589,11 @@ def resolver_facturacion_estancia(stay: Dict[str, Any], idx_fact: Dict[str, Any]
         "esFactura": es_factura,
         "tipoComp": tipo_comp_resuelto,
         "montoFacturado": round(float(monto_facturado or 0), 2),
-        "montoSolicitadoFact": round(monto_fact_bd, 2),
+        "montoSolicitadoFact": round(subtotal_aloj if (monto_fact_bd > 0 or m_fact_pactado > 0) else monto_fact_bd, 2),
         "montoPorFacturar": round(float(monto_por_facturar or 0), 2),
         "adicComprobante": round(adic_comp, 2),
-        "tarifaNoche": round(tarifa_noche, 2),
-        "noches": noches,
+        "tarifaNoche": round(tarifa_diaria_fact, 2),
+        "noches": noches_fact,
         "subtotalAloj": round(subtotal_aloj, 2),
         "adicSnacks": round(snacks, 2),
         "adicServicios": round(servicios, 2),
@@ -721,6 +809,13 @@ def obtener_datos_panel_local(fecha_override: Optional[str] = None) -> Dict[str,
             if r_ep and n_ep:
                 mapa_emp_por_ruc[r_ep] = n_ep
 
+        by_uuid = {str(r["estancia_uuid"] or "").strip(): r for r in rows_est if r["estancia_uuid"]}
+        by_hab: Dict[str, List[Any]] = {}
+        for r in rows_est:
+            h = str(r["hab"] or "").strip()
+            if h:
+                by_hab.setdefault(h, []).append(r)
+
         estancias_cache: List[Dict[str, Any]] = []
         mapa_bd_por_fecha: Dict[str, Dict[str, Any]] = {}
         mapa_historial_dia: Dict[str, List[Dict[str, Any]]] = {}
@@ -839,6 +934,10 @@ def obtener_datos_panel_local(fecha_override: Optional[str] = None) -> Dict[str,
                 "montoFactBD": float(r["monto_factura"] or 0),
             }
 
+            f_in_pendiente, m_fact_pactado, parent_emitido = resolver_cadena_estancias_pendientes(r, by_uuid, by_hab, idx_fact)
+            info_fila["fInPendiente"] = f_in_pendiente
+            info_fila["mFactPactado"] = m_fact_pactado
+            info_fila["parentEmitido"] = parent_emitido
             info_fila["facturacion"] = resolver_facturacion_estancia(info_fila, idx_fact)
 
             if not hotel_apoyo and len(estancias_cache) < 350:
