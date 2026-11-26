@@ -940,8 +940,8 @@
             </div>
             <div class="grid-3">
               <div class="field" style="min-width: 0;">
-                <label for="mFact">Monto Factura/Comp. (S/)</label>
-                <input type="text" id="mFact" name="mFact" inputmode="decimal" placeholder="Ej. 90">
+                <label for="mFact" title="Precio por noche que irá en la factura o boleta. Vacío = tarifa por noche.">Precio factura x noche (S/)</label>
+                <input type="text" id="mFact" name="mFact" inputmode="decimal" placeholder="Vacío = tarifa">
               </div>
               <div class="field" style="min-width: 0;">
                 <label for="adicComp">Adic. por Comp. (S/)</label>
@@ -1093,6 +1093,11 @@
             <input type="text" id="contTarifaNueva" inputmode="decimal" required>
             <span class="error-hint">Ingresa la tarifa.</span>
           </div>
+        </div>
+
+        <div class="field">
+          <label for="contFactNueva" title="Precio por noche que irá en la factura o boleta. Vacío = tarifa por noche.">Precio factura x noche (S/)</label>
+          <input type="text" id="contFactNueva" inputmode="decimal" placeholder="Vacío = tarifa">
         </div>
 
         <div class="grid-2">
@@ -1559,6 +1564,7 @@
     const contTarifaNueva = document.getElementById('contTarifaNueva');
     const contFechaIn = document.getElementById('contFechaIn');
     const contFechaOut = document.getElementById('contFechaOut');
+    const contFactNueva = document.getElementById('contFactNueva');
 
     let EMPRESAS_CAT = {};
     const tabBtnGrupal = document.getElementById('tabBtnGrupal');
@@ -2349,6 +2355,7 @@
         CONT_EDITADO = false;
         CONT_HAB_DESEADA = String(est.hab);
         contTarifaNueva.value = est.tarifa || '';
+        contFactNueva.value = est.montoFact === '' || est.montoFact === undefined ? '' : est.montoFact;
         contFechaIn.value = est.checkInNuevoISO;
         contFechaOut.value = sumarDiasIso(est.checkInNuevoISO, 1);
         CONT_PERSONAS = (est.personas || []).map((p) => ({ nombre: p.nombre || '', dni: p.dni || '' }));
@@ -2508,6 +2515,8 @@
           : 'Elige una habitación libre.';
       }
       if (!(parseFloat(String(contTarifaNueva.value).replace(',', '.')) > 0)) return 'Ingresa la tarifa por noche.';
+      const factTxt = String(contFactNueva.value).trim().replace(',', '.');
+      if (factTxt && !(parseFloat(factTxt) >= 0)) return 'El precio factura por noche debe ser un número (o vacío = tarifa).';
       const llenas = CONT_PERSONAS.filter((p) => p.nombre.trim() || p.dni.trim());
       if (!llenas.length) return 'Debe quedar al menos una persona en la habitación.';
       if (llenas.some((p) => !p.nombre.trim())) return 'Hay una persona con DNI pero sin nombre.';
@@ -2540,6 +2549,10 @@
       validarContinuacion();
     });
     contTarifaNueva.addEventListener('input', () => {
+      CONT_EDITADO = true;
+      validarContinuacion();
+    });
+    contFactNueva.addEventListener('input', () => {
       CONT_EDITADO = true;
       validarContinuacion();
     });
@@ -2600,6 +2613,7 @@
         huespedAnterior: est.nombre || '',
         habNueva: contHabNueva.value,
         tarifaNueva: parseFloat(String(contTarifaNueva.value).replace(',', '.')),
+        montoFactNueva: String(contFactNueva.value).trim().replace(',', '.'),
         fechaInNueva: contFechaIn.value,
         fechaOutNueva: contFechaOut.value,
         personas: CONT_PERSONAS

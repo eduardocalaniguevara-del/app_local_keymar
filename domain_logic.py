@@ -305,6 +305,61 @@ def cargar_indices_facturacion_memoria(conn) -> Dict[str, Any]:
     }
 
 
+def _es_estancia_facturada(r: Any, idx_fact: Dict[str, Any]) -> bool:
+    calz = idx_fact.get("calzadoPorFila", {}).get(f"E{int(r['sheet_row'] or 0)}")
+    return bool(
+        str(r["estado_comp"] or "").strip().lower().startswith("emitid")
+        or str(r["nro_comp"] or "").strip()
+        or (calz and float(calz.get("montoSunat") or 0) > 0)
+    )
+
+
+def cadena_factura_estancia(conn, r: Any, por_id: Dict[str, List[Any]], idx_fact: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Filas que suma el Monto Facturado de la estancia r (orden cronológico, r al final).
+    Sigue el enlace BB (id_anterior) hacia atrás y se detiene en la primera estancia ya facturada.
+    Cada fila aporta: noches x precio factura por noche (AJ; si está vacío, la tarifa). Sin adicionales."""
+    filas = [r]
+    vistos = {r["estancia_uuid"]}
+    cur = r
+    for _ in range(120):
+        pid = _canon_id_estancia(cur["id_anterior"] if "id_anterior" in cur.keys() else "")
+        if not pid:
+            break
+        if pid not in por_id and conn is not None and not por_id.get("__todas__"):
+            # La anterior quedó fuera de la ventana reciente: cargar todas una sola vez
+            for x in conn.execute("SELECT * FROM estancias").fetchall():
+                k = _canon_id_estancia(x["id_timestamp_str"])
+                if not any(y["estancia_uuid"] == x["estancia_uuid"] for y in por_id.get(k, [])):
+                    por_id.setdefault(k, []).append(x)
+            por_id["__todas__"] = [True]
+        padres = por_id.get(pid, [])
+        if len(padres) != 1:
+            break
+        p = padres[0]
+        if p["estancia_uuid"] in vistos or _situacion_estancia(p) == "CANCELADA" or _es_estancia_facturada(p, idx_fact):
+            break
+        vistos.add(p["estancia_uuid"])
+        filas.append(p)
+        cur = p
+    filas.reverse()
+    salida = []
+    for x in filas:
+        noches = max(1, int(x["noches"] or 1))
+        aj = float(x["monto_factura"] or 0)
+        precio = aj if aj > 0 else float(x["tarifa"] or 0)
+        salida.append({
+            "fila": int(x["sheet_row"] or 0),
+            "checkIn": normalizar_fecha_dmy(x["fecha_in_dmy"]),
+            "checkOut": normalizar_fecha_dmy(x["fecha_out_dmy"]),
+            "huesped": x["huesped"],
+            "noches": noches,
+            "precio": round(precio, 2),
+            "precioEsFactura": aj > 0,
+            "subtotal": round(noches * precio, 2),
+        })
+    return salida
+
+
 def resolver_cadena_estancias_pendientes(
     cur_r: Any,
     by_uuid: Dict[str, Any],
@@ -435,18 +490,16 @@ def resolver_facturacion_estancia(stay: Dict[str, Any], idx_fact: Dict[str, Any]
     tarifa_noche = float(stay.get("tarifa") or 0)
     noches = max(1, int(stay.get("noches") or 1))
 
-    f_in_pend = str(stay.get("fInPendiente") or "")
-    check_out = str(stay.get("checkOut") or "")
-    if f_in_pend and f_in_pend != check_in and check_out:
-        noches_fact = max(noches, calcular_noches(f_in_pend, check_out))
+    cadena_fact = stay.get("cadenaFact") or []
+    if cadena_fact:
+        # Monto Facturado acumulado: cada fila de la cadena con su precio factura por noche
+        noches_fact = sum(int(x["noches"]) for x in cadena_fact)
+        tarifa_diaria_fact = float(cadena_fact[-1]["precio"])
+        subtotal_aloj = round(sum(float(x["subtotal"]) for x in cadena_fact), 2)
     else:
         noches_fact = noches
-
-    tarifa_diaria_fact = (
-        monto_fact_bd if monto_fact_bd > 0
-        else (m_fact_pactado if m_fact_pactado > 0 else tarifa_noche)
-    )
-    subtotal_aloj = round(noches_fact * tarifa_diaria_fact, 2)
+        tarifa_diaria_fact = monto_fact_bd if monto_fact_bd > 0 else tarifa_noche
+        subtotal_aloj = round(noches_fact * tarifa_diaria_fact, 2)
     snacks = float(stay.get("snacks") or 0)
     servicios = float(stay.get("servicios") or 0)
     estado_comp_bd = str(stay.get("estadoCompBD") or "").strip()
@@ -485,7 +538,7 @@ def resolver_facturacion_estancia(stay: Dict[str, Any], idx_fact: Dict[str, Any]
     if estado_comp_lower.startswith("emitido") and nro_comp_bd:
         # Si ya fue emitido en local (o registrado con número en BD), prioridad inmediata
         estado_fact = "Emitido"
-        monto_facturado = monto_fact_bd if monto_fact_bd > 0 else (suma_lineas_sunat or pago_yape or subtotal_aloj)
+        monto_facturado = suma_lineas_sunat if suma_lineas_sunat > 0 else subtotal_aloj
         if not comprobantes_detalle:
             comprobantes_detalle.append({
                 "nro": nro_comp_bd,
@@ -536,7 +589,7 @@ def resolver_facturacion_estancia(stay: Dict[str, Any], idx_fact: Dict[str, Any]
     else:
         if "emitido" in estado_comp_lower or (nro_comp_bd != "" and estado_comp_lower != "pendiente"):
             estado_fact = "Emitido"
-            monto_facturado = monto_fact_bd if monto_fact_bd > 0 else (pago_yape if pago_yape > 0 else (subtotal_aloj + adic_comp + snacks + servicios))
+            monto_facturado = subtotal_aloj
             if not comprobantes_detalle:
                 comprobantes_detalle.append({
                     "nro": nro_comp_bd or "Registrado en Recepción",
@@ -561,11 +614,12 @@ def resolver_facturacion_estancia(stay: Dict[str, Any], idx_fact: Dict[str, Any]
             or adic_comp > 0
         ):
             estado_fact = "Pendiente"
-            monto_facturado = monto_fact_bd if monto_fact_bd > 0 else 0.0
+            monto_facturado = 0.0
 
     monto_acordado_total = round(subtotal_aloj + adic_comp + snacks + servicios, 2)
-    if monto_fact_bd > 0 and monto_fact_bd > subtotal_aloj:
-        monto_por_facturar = monto_fact_bd
+    if cadena_fact and not tiene_cp_en_calzado and not comprobantes_detalle:
+        # Lo que pide el huésped: noches x precio factura, sin adicionales
+        monto_por_facturar = subtotal_aloj
     elif calzado and (float(calzado.get("montoSunat") or 0) > 0 or float(calzado.get("montoAJ") or 0) > 0):
         monto_por_facturar = (
             float(calzado.get("montoSunat") or 0)
@@ -589,7 +643,10 @@ def resolver_facturacion_estancia(stay: Dict[str, Any], idx_fact: Dict[str, Any]
         "esFactura": es_factura,
         "tipoComp": tipo_comp_resuelto,
         "montoFacturado": round(float(monto_facturado or 0), 2),
-        "montoSolicitadoFact": round(subtotal_aloj if (monto_fact_bd > 0 or m_fact_pactado > 0) else monto_fact_bd, 2),
+        "montoSolicitadoFact": round(subtotal_aloj if cadena_fact else (subtotal_aloj if monto_fact_bd > 0 else 0.0), 2),
+        "desgloseFact": cadena_fact,
+        "montoFactPrevio": round(sum(float(x["subtotal"]) for x in cadena_fact[:-1]), 2) if cadena_fact else 0.0,
+        "nochesFila": int(cadena_fact[-1]["noches"]) if cadena_fact else noches,
         "montoPorFacturar": round(float(monto_por_facturar or 0), 2),
         "adicComprobante": round(adic_comp, 2),
         "tarifaNoche": round(tarifa_diaria_fact, 2),
@@ -816,6 +873,10 @@ def obtener_datos_panel_local(fecha_override: Optional[str] = None) -> Dict[str,
             if h:
                 by_hab.setdefault(h, []).append(r)
 
+        por_id_canon: Dict[str, List[Any]] = {}
+        for r in rows_est:
+            por_id_canon.setdefault(_canon_id_estancia(r["id_timestamp_str"]), []).append(r)
+
         estancias_cache: List[Dict[str, Any]] = []
         mapa_bd_por_fecha: Dict[str, Dict[str, Any]] = {}
         mapa_historial_dia: Dict[str, List[Dict[str, Any]]] = {}
@@ -934,10 +995,11 @@ def obtener_datos_panel_local(fecha_override: Optional[str] = None) -> Dict[str,
                 "montoFactBD": float(r["monto_factura"] or 0),
             }
 
-            f_in_pendiente, m_fact_pactado, parent_emitido = resolver_cadena_estancias_pendientes(r, by_uuid, by_hab, idx_fact)
-            info_fila["fInPendiente"] = f_in_pendiente
-            info_fila["mFactPactado"] = m_fact_pactado
-            info_fila["parentEmitido"] = parent_emitido
+            cadena_fact = cadena_factura_estancia(conn, r, por_id_canon, idx_fact)
+            info_fila["cadenaFact"] = cadena_fact
+            info_fila["fInPendiente"] = cadena_fact[0]["checkIn"] if cadena_fact else f_in
+            info_fila["mFactPactado"] = 0.0
+            info_fila["parentEmitido"] = False
             info_fila["facturacion"] = resolver_facturacion_estancia(info_fila, idx_fact)
 
             if not hotel_apoyo and len(estancias_cache) < 350:
@@ -2168,6 +2230,7 @@ def datos_continuacion(conn, ymd_vista: int) -> Dict[str, Any]:
                 "saldo": saldo,
                 "estado": r["estado_estancia"],
                 "personas": _personas_estancia(r),
+                "montoFact": float(r["monto_factura"] or 0) if float(r["monto_factura"] or 0) > 0 else "",
                 "checkInNuevoISO": f"{fin[0:4]}-{fin[4:6]}-{fin[6:8]}",
             })
 
@@ -2278,6 +2341,12 @@ def continuar_estancia_local(datos: Dict[str, Any]) -> Dict[str, Any]:
                 f"({o['fecha_in_dmy']} → {o['fecha_out_dmy']}). Elige otra habitación libre."
             )
         campos = _campos_personas_continuacion(conn, datos.get("personas"), old)
+        if datos.get("montoFactNueva") in (None, ""):
+            precio_fact_nuevo = float(old["monto_factura"] or 0) if datos.get("montoFactNueva") is None else 0.0
+        else:
+            precio_fact_nuevo = parse_moneda(datos.get("montoFactNueva"))
+            if precio_fact_nuevo < 0:
+                raise ValueError("El precio de factura por noche no puede ser negativo.")
 
         # 1. Cerrar estancia anterior como "Finalizado - Continúa"
         conn.execute(
@@ -2292,6 +2361,7 @@ def continuar_estancia_local(datos: Dict[str, Any]) -> Dict[str, Any]:
             "id_timestamp_str": id_ts_str,
             "sheet_row": 0,
             "parent_uuid": old["estancia_uuid"],
+            "id_anterior": _canon_id_estancia(old["id_timestamp_str"]),
             "fecha_in_dmy": f_in_nueva,
             "fecha_out_dmy": f_out_nueva,
             "ymd_in": ymd_in,
@@ -2317,7 +2387,7 @@ def continuar_estancia_local(datos: Dict[str, Any]) -> Dict[str, Any]:
             "tipo_comp": "Factura" if old["ruc"] or old["empresa"] else "",
             "estado_comp": "Pendiente" if old["ruc"] or old["empresa"] else "",
             "nro_comp": "",
-            "monto_factura": 0.0,
+            "monto_factura": precio_fact_nuevo,
             "estado_estancia": "En Curso",
             "empresa": old["empresa"],
             "proyecto": old["proyecto"],
@@ -2339,7 +2409,7 @@ def continuar_estancia_local(datos: Dict[str, Any]) -> Dict[str, Any]:
                 deuda_anterior, cuenta_destino, solicita_comp, tipo_comp, estado_comp,
                 nro_comp, monto_factura, estado_estancia, empresa, proyecto,
                 triple1, triple2, hotel_apoyo, observaciones, nro_op_yape, celular, ruc,
-                dirty, updated_at
+                id_anterior, dirty, updated_at
             ) VALUES (
                 :estancia_uuid, :id_timestamp_str, 0, :parent_uuid,
                 :fecha_in_dmy, :fecha_out_dmy, :ymd_in, :ymd_out, :hora_registro,
@@ -2350,7 +2420,7 @@ def continuar_estancia_local(datos: Dict[str, Any]) -> Dict[str, Any]:
                 :deuda_anterior, :cuenta_destino, :solicita_comp, :tipo_comp, :estado_comp,
                 :nro_comp, :monto_factura, :estado_estancia, :empresa, :proyecto,
                 :triple1, :triple2, :hotel_apoyo, :observaciones, :nro_op_yape, :celular, :ruc,
-                1, :updated_at
+                :id_anterior, 1, :updated_at
             )
             """,
             {**rec, "updated_at": ahora.isoformat()},
@@ -2368,6 +2438,7 @@ def continuar_estancia_local(datos: Dict[str, Any]) -> Dict[str, Any]:
                 "new_uuid": new_uuid,
                 "id_timestamp_str": id_ts_str,
                 "fila_nueva": fila_sheets,
+                "id_anterior": rec["id_anterior"],
             },
             delta_caja=0.0,
         )
@@ -2380,6 +2451,113 @@ def continuar_estancia_local(datos: Dict[str, Any]) -> Dict[str, Any]:
         "nombre": campos["huesped"],
         "deudaArrastre": deuda_arrastre,
     }
+
+
+# ==============================================================================
+# ARRASTRE AUTOMÁTICO DE DEUDA EN CADENAS DE CONTINUACIÓN
+# Cada estancia continuada guarda en BB (id_anterior) el ID de la anterior.
+# Su "deuda anterior" (AL) debe ser siempre el saldo final de esa estancia.
+# Si cambia una estancia (lápiz, pago, consumo...), se corrige toda la cadena hacia adelante.
+# ==============================================================================
+_LOCK_CADENA = _threading.Lock()
+
+
+def _canon_id_estancia(v: Any) -> str:
+    s = str(v or "").strip()
+    m = re.match(r"^(\d{1,2})/(\d{1,2})/(\d{2,4})(?:\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?(.*)$", s)
+    if not m:
+        return s
+    yy = m.group(3) if len(m.group(3)) == 4 else "20" + m.group(3)
+    base = f"{int(m.group(1)):02d}/{int(m.group(2)):02d}/{yy}"
+    if m.group(4) is not None:
+        base += f" {int(m.group(4)):02d}:{int(m.group(5) or 0):02d}:{int(m.group(6) or 0):02d}"
+    return base + (m.group(7) or "")
+
+
+def _sync_soporta_cadena() -> bool:
+    """Solo se propaga si el motor de sincronización en uso sabe subir DEUDA_CADENA."""
+    for nombre in ("main", "__main__"):
+        f = getattr(_sys.modules.get(nombre), "process_sync_queue", None)
+        if f is not None:
+            return bool(getattr(f, "soporta_deuda_cadena", False))
+    return False
+
+
+def propagar_deudas_cadena(forzar: bool = False) -> int:
+    """Pone en cada estancia enlazada AL = saldo final de su estancia anterior. Devuelve filas corregidas."""
+    if not (forzar or _sync_soporta_cadena()):
+        return 0
+    if not _LOCK_CADENA.acquire(timeout=10):
+        return 0
+    try:
+        with db_transaction() as conn:
+            hijas = conn.execute(
+                "SELECT * FROM estancias WHERE trim(coalesce(id_anterior, '')) != '' ORDER BY ymd_in, sheet_row"
+            ).fetchall()
+            if not hijas:
+                return 0
+            ids = {_canon_id_estancia(h["id_anterior"]) for h in hijas}
+            por_id: Dict[str, List[Any]] = {}
+            for r in conn.execute("SELECT * FROM estancias").fetchall():
+                k = _canon_id_estancia(r["id_timestamp_str"])
+                if k in ids:
+                    por_id.setdefault(k, []).append(r)
+
+            deuda_nueva: Dict[str, float] = {}  # estancia_uuid -> AL ya corregido en esta pasada
+
+            def saldo(r: Any) -> float:
+                if r["estancia_uuid"] in deuda_nueva:
+                    d = dict(r)
+                    d["deuda_anterior"] = deuda_nueva[r["estancia_uuid"]]
+                    return _saldo_para_continuar(d)
+                return _saldo_para_continuar(r)
+
+            corregidas = 0
+            for _ in range(60):  # cadenas largas: se repite hasta que no cambie nada
+                cambio = False
+                for h in hijas:
+                    padres = por_id.get(_canon_id_estancia(h["id_anterior"]), [])
+                    if len(padres) != 1 or _situacion_estancia(h) == "CANCELADA":
+                        continue  # sin anterior único o cancelada: no se toca
+                    padre = padres[0]
+                    if _situacion_estancia(padre) == "CANCELADA":
+                        continue
+                    nueva = saldo(padre)
+                    actual = deuda_nueva.get(h["estancia_uuid"], float(h["deuda_anterior"] or 0))
+                    if abs(nueva - actual) <= 0.009:
+                        continue
+                    deuda_nueva[h["estancia_uuid"]] = nueva
+                    cambio = True
+                if not cambio:
+                    break
+
+            for h in hijas:
+                if h["estancia_uuid"] not in deuda_nueva:
+                    continue
+                nueva = deuda_nueva[h["estancia_uuid"]]
+                antes = round(float(h["deuda_anterior"] or 0), 2)
+                if abs(nueva - antes) <= 0.009:
+                    continue
+                conn.execute(
+                    "UPDATE estancias SET deuda_anterior = ?, dirty = 1, updated_at = ? WHERE estancia_uuid = ?",
+                    (nueva, datetime.now().isoformat(), h["estancia_uuid"]),
+                )
+                _encolar_operacion(
+                    conn,
+                    "DEUDA_CADENA",
+                    h["estancia_uuid"],
+                    {
+                        "_mov_detalle": [{"campo": "Deuda anterior (arrastre)", "antes": f"{antes:.2f}", "despues": f"{nueva:.2f}"}],
+                        "estancia_uuid": h["estancia_uuid"],
+                        "id_timestamp_str": h["id_timestamp_str"],
+                        "sheet_row": int(h["sheet_row"] or 0),
+                        "deuda_anterior": nueva,
+                    },
+                )
+                corregidas += 1
+            return corregidas
+    finally:
+        _LOCK_CADENA.release()
 
 
 def obtener_estancia_para_modificar_local(hab_buscada: str, fila_o_id: Any = None) -> Dict[str, Any]:
@@ -3553,7 +3731,7 @@ def _registrar_movimiento(conn, accion: str, hab: str = "", huesped: str = "", r
 def _movimiento_desde_operacion(conn, op_type: str, entity_uuid: str, payload: Dict[str, Any],
                                 delta_caja: float, detalle: Optional[List[Dict[str, str]]]) -> None:
     est = None
-    if op_type in ("CHECKIN", "CONTINUAR", "PAGO", "MODIFICAR", "LIBERAR", "CANCELAR", "RESTAURAR", "FACT_META"):
+    if op_type in ("CHECKIN", "CONTINUAR", "PAGO", "MODIFICAR", "LIBERAR", "CANCELAR", "RESTAURAR", "FACT_META", "DEUDA_CADENA"):
         est = conn.execute(
             "SELECT hab, huesped, tarifa, noches, estado_estancia FROM estancias WHERE estancia_uuid = ?",
             (entity_uuid,),
@@ -3617,6 +3795,9 @@ def _movimiento_desde_operacion(conn, op_type: str, entity_uuid: str, payload: D
     elif op_type == "FACT_META":
         accion = "Facturación"
         resumen = f"{cab} · datos de comprobante actualizados"
+    elif op_type == "DEUDA_CADENA":
+        accion = "Arrastre de Deuda"
+        resumen = f"{cab} · deuda anterior actualizada a S/ {float(payload.get('deuda_anterior') or 0):.2f}"
     else:
         accion = op_type.title()
         resumen = cab or op_type
@@ -6570,8 +6751,13 @@ def _inyectar_rutas_en_servidor_activo() -> None:
                     else:
                         raise HTTPException(status_code=404, detail=f"Método RPC no soportado: {method_name}")
 
-                    if hasattr(_m_bound, "WRITE_METHODS") and method_name in _m_bound.WRITE_METHODS and hasattr(_m_bound, "_sync_wakeup_event"):
-                        _m_bound._sync_wakeup_event.set()
+                    if hasattr(_m_bound, "WRITE_METHODS") and method_name in _m_bound.WRITE_METHODS:
+                        try:
+                            _dl_self.propagar_deudas_cadena()
+                        except Exception as exc_cad:
+                            print(f"[CADENA] Aviso propagando deuda: {exc_cad}")
+                        if hasattr(_m_bound, "_sync_wakeup_event"):
+                            _m_bound._sync_wakeup_event.set()
 
                     sync_st = _dl_self.obtener_estado_red_cola()
                     if isinstance(res, dict) and "syncStatus" not in res:

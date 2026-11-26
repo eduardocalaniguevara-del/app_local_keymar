@@ -29,6 +29,8 @@ from domain_logic import (
 )
 
 _sync_lock = threading.Lock()
+COL_ID_ANTERIOR = "BB"      # Registro_Estancias: ID (columna A) de la estancia de la que continúa
+COL_ID_ANTERIOR_IDX = 53
 _gspread_client = None
 _spreadsheet = None
 
@@ -235,7 +237,7 @@ def pull_from_sheets(full_bootstrap: bool = False) -> Dict[str, Any]:
         ranges_step2 = []
         keys_step2 = []
         if not full_bootstrap and total_rows_bd >= 2:
-            ranges_step2.append(f"'Registro_Estancias'!A{start_row_recent}:BA{total_rows_bd}")
+            ranges_step2.append(f"'Registro_Estancias'!A{start_row_recent}:BB{total_rows_bd}")
             keys_step2.append("bd")
         if last_t >= 2:
             ranges_step2.append(f"'2.Registro_Ventas_Tienda'!A{st_t}:L{last_t}")
@@ -596,6 +598,10 @@ def pull_from_sheets(full_bootstrap: bool = False) -> Dict[str, Any]:
                 conn.execute(
                     "UPDATE estancias SET tipo_adicional = ? WHERE id_timestamp_str = ? AND dirty = 0",
                     (_g(COL_TIPO_ADICIONAL_IDX), id_ts_val),
+                )
+                conn.execute(
+                    "UPDATE estancias SET id_anterior = ? WHERE id_timestamp_str = ? AND dirty = 0",
+                    (_canon_ts_id(_g(COL_ID_ANTERIOR_IDX)), id_ts_val),
                 )
 
             # Limpiar en espejo estancias eliminadas en Registro_Estancias (ventana reciente + histórico por Col A)
@@ -1262,6 +1268,12 @@ def process_sync_queue() -> Dict[str, Any]:
     """
     Procesa en orden FIFO estricto las operaciones pendientes en sync_queue.
     """
+    try:
+        import domain_logic as _dl_cadena
+        _dl_cadena.propagar_deudas_cadena(forzar=True)
+    except Exception as exc_cad:
+        print(f"[SYNC] Aviso propagando deudas de cadenas: {exc_cad}")
+
     conn = get_connection()
     try:
         pending_items = conn.execute(
@@ -1322,6 +1334,12 @@ def process_sync_queue() -> Dict[str, Any]:
                         ws_bd.update(range_name=f"AK{old_row}", values=[["Finalizado - Continúa"]], value_input_option="USER_ENTERED")
 
                     new_row = _append_fila_idempotente(ws_bd, payload["id_timestamp_str"], payload["fila_nueva"], "AY")
+                    if payload.get("id_anterior") and new_row >= 2:
+                        ws_bd.update(
+                            range_name=f"{COL_ID_ANTERIOR}{new_row}",
+                            values=[[payload["id_anterior"]]],
+                            value_input_option="RAW",
+                        )
                     with db_transaction() as c_up:
                         if old_row >= 2:
                             c_up.execute("UPDATE estancias SET dirty = 0 WHERE estancia_uuid = ?", (payload.get("old_uuid"),))
@@ -1398,6 +1416,23 @@ def process_sync_queue() -> Dict[str, Any]:
                         if est_up:
                             c_up.execute("UPDATE estancias SET dirty = 0 WHERE estancia_uuid = ?", (est_up["estancia_uuid"],))
 
+                elif op_type == "DEUDA_CADENA":
+                    t_row_d = _resolver_fila_estancia_en_sheets(
+                        ws_bd, int(payload.get("sheet_row") or 0), payload.get("id_timestamp_str") or ""
+                    )
+                    if t_row_d < 2:
+                        raise ValueError(f"DEUDA_CADENA: no se encontró la fila {payload.get('id_timestamp_str')}")
+                    ws_bd.update(
+                        range_name=f"AL{t_row_d}",
+                        values=[[payload["deuda_anterior"]]],
+                        value_input_option="USER_ENTERED",
+                    )
+                    with db_transaction() as c_up:
+                        c_up.execute(
+                            "UPDATE estancias SET sheet_row = ?, dirty = 0 WHERE estancia_uuid = ?",
+                            (t_row_d, item["entity_uuid"]),
+                        )
+
                 elif op_type == "ELIMINAR_ESTANCIA_ADMIN":
                     t_row_e = _resolver_fila_estancia_en_sheets(
                         ws_bd, int(payload.get("sheet_row") or 0), payload.get("id_timestamp_str") or ""
@@ -1406,7 +1441,7 @@ def process_sync_queue() -> Dict[str, Any]:
                         ws_bd.delete_rows(t_row_e)
                     elif t_row_e == 2:
                         # Protege las fórmulas =MAP(...) alojadas en la Fila 2 (P2, R2, V2, AA2:AD2, AN2:AO2, y S2 si aplica)
-                        rangos_f2 = ["A2:O2", "Q2", "T2:U2" if FORMULA_SNACKS_EN_S2 else "S2:U2", "W2:Z2", "AE2:AM2", "AP2:BA2"]
+                        rangos_f2 = ["A2:O2", "Q2", "T2:U2" if FORMULA_SNACKS_EN_S2 else "S2:U2", "W2:Z2", "AE2:AM2", "AP2:BB2"]
                         ws_bd.batch_clear(rangos_f2)
 
                     pagos_vinc = payload.get("pagos_vinculados") or []
@@ -2016,3 +2051,7 @@ def process_sync_queue() -> Dict[str, Any]:
         return {"status": "OFFLINE", "processed": processed, "error": str(e)}
     finally:
         _sync_lock.release()
+
+
+# Marca para domain_logic: este motor sabe subir DEUDA_CADENA y la columna BB
+process_sync_queue.soporta_deuda_cadena = True

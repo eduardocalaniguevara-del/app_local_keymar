@@ -469,6 +469,9 @@ def init_db() -> None:
             cols_est = [r[1] for r in conn.execute("PRAGMA table_info(estancias)").fetchall()]
             if "tipo_adicional" not in cols_est:
                 conn.execute("ALTER TABLE estancias ADD COLUMN tipo_adicional TEXT NOT NULL DEFAULT ''")
+            # Migración: enlace de continuación (columna BB = ID de la estancia anterior)
+            if "id_anterior" not in cols_est:
+                conn.execute("ALTER TABLE estancias ADD COLUMN id_anterior TEXT NOT NULL DEFAULT ''")
             # Migración: personal asociado a gastos (Adelanto de sueldo -> columna J de Registro_Gastos)
             cols_gas = [r[1] for r in conn.execute("PRAGMA table_info(gastos)").fetchall()]
             if "personal" not in cols_gas:

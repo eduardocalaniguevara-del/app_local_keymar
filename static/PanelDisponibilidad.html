@@ -243,7 +243,7 @@
           <th class="border-r border-[#433A36] w-[62px] text-center">Pago ℹ️</th>
           <th class="border-r border-[#433A36] w-[54px] text-center">Adicional ℹ️</th>
           <th class="border-r border-[#433A36] w-[84px] text-center" title="Estado de Boleta / Factura (CALZADO_OCT / SUNAT_OCT)">Estado Fact. ℹ️</th>
-          <th class="border-r border-[#433A36] w-[54px] text-center" title="Monto Facturado / Solicitado">Monto Fact.</th>
+          <th class="border-r border-[#433A36] w-[54px] text-center" title="Monto a facturar acumulado: noches x precio factura por noche (vacío = tarifa), desde la última factura emitida">Monto Fact.</th>
           <th class="border-r border-[#433A36] w-[70px] text-center">Acción Rápida</th>
           <th class="text-center w-[30px] p-0.5" title="Venta Libre de Tienda (sin habitación)">
             <button type="button" onclick="abrirTiendaLibre(event)" class="w-full py-0.5 px-1 rounded bg-purple-600 hover:bg-purple-500 text-white text-[14px] leading-none cursor-pointer transition-all hover:scale-110 shadow-2xs flex items-center justify-center mx-auto" title="Registrar Venta Libre de Tienda (sin habitación)">🛒</button>
@@ -1585,8 +1585,8 @@
               <input type="text" id="mod_nroComp" placeholder="E001-355" class="w-full px-2 py-1 rounded border border-slate-300 bg-white font-mono">
             </div>
             <div>
-              <label class="block text-[10px] font-bold text-slate-600">Monto Comp. (S/)</label>
-              <input type="number" step="0.01" id="mod_montoFact" class="w-full px-2 py-1 rounded border border-slate-300 bg-white font-bold">
+              <label class="block text-[10px] font-bold text-slate-600" title="Vacío = tarifa por noche">Precio factura x noche (S/)</label>
+              <input type="number" step="0.01" id="mod_montoFact" placeholder="Vacío = tarifa" class="w-full px-2 py-1 rounded border border-slate-300 bg-white font-bold">
             </div>
             <div>
               <label class="block text-[10px] font-bold text-slate-600">RUC</label>
@@ -3432,6 +3432,19 @@
     }
 
     // Modal de Detalle de Facturación (Boleta / Factura + Desglose Estadía/Adicionales + Control Pendiente/Emitido + CALZADO_OCT/SUNAT_OCT)
+    // Recalcula en vivo el total a facturar al cambiar el precio por noche en la ventana
+    function onCambiarPrecioFactModal(valor) {
+      const ctx = window._factModalCtx || { previo: 0, nochesFila: 1 };
+      const precio = Number(valor) || 0;
+      const sub = precio * ctx.nochesFila;
+      const total = ctx.previo + sub;
+      const poner = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v.toFixed(2); };
+      poner("modalFact_precioFila", precio);
+      poner("modalFact_subFila", sub);
+      poner("modalFact_totalBarra", total);
+      poner("modalFact_totalCab", total);
+    }
+
     function verDetalleFacturacion(e, habNum) {
       if (e) e.stopPropagation();
       const h = habitacionesData.find(x => String(x.hab) === String(habNum));
@@ -3483,8 +3496,17 @@
       const yapeEst = Number(f.yapeEstancia !== undefined ? f.yapeEstancia : (h.pagoDetalle && h.pagoDetalle.yape)) || 0;
       const codYape = f.codigoYape || (h.pagoDetalle && h.pagoDetalle.codigoMontoHora) || "-";
 
-      // Monto por el cual se quiere hacer la factura / boleta
-      const montoSolicitado = Number(f.montoSolicitadoFact) || Number(f.montoFacturado) || Number(f.montoPorFacturar) || (subtotalAloj + adicComp) || yapeEst || 0;
+      // Monto por el cual se quiere hacer la factura / boleta: noches x precio factura por noche (sin adicionales)
+      const desgloseFilas = (f.desgloseFact && f.desgloseFact.length) ? f.desgloseFact : [{
+        checkIn: h.checkIn, checkOut: h.checkOut || "-", noches: noches,
+        precio: tarifaNoche, precioEsFactura: false, subtotal: tarifaNoche * noches
+      }];
+      const precioFilaActual = Number(desgloseFilas[desgloseFilas.length - 1].precio) || 0;
+      window._factModalCtx = {
+        previo: Number(f.montoFactPrevio) || 0,
+        nochesFila: Number(desgloseFilas[desgloseFilas.length - 1].noches) || 1
+      };
+      const montoSolicitado = Number(f.montoSolicitadoFact) || Number(f.montoFacturado) || Number(f.montoPorFacturar) || subtotalAloj || 0;
       const nroActual = f.comprobantesStr || "";
 
       popTitle.innerHTML = `🧾 Detalle de Facturación (${tipoLabel}) — Hab. ${h.hab} (${h.huesped})`;
@@ -3575,7 +3597,7 @@
             <div class="text-right bg-white px-3 py-1 rounded-lg border border-slate-200/90 shadow-2xs">
               <div class="text-[9px] font-extrabold text-slate-400 uppercase tracking-wider">Total ${tipoLabel}</div>
               <div class="font-black text-base leading-tight ${f.estado === 'Emitido' ? 'text-emerald-700' : (esFact ? 'text-orange-600' : 'text-amber-900')}">
-                S/ ${montoSolicitado.toFixed(2)}
+                S/ <span id="modalFact_totalCab">${montoSolicitado.toFixed(2)}</span>
               </div>
             </div>
           </div>
@@ -3643,35 +3665,29 @@
             </div>
           </div>
 
-          <!-- 3. DESGLOSE COMPACTO Y ESTÉTICO DEL MONTO -->
+          <!-- 3. DESGLOSE: NOCHES x PRECIO FACTURA POR NOCHE (CADENA DE CONTINUACIONES, SIN ADICIONALES) -->
           <div class="bg-slate-50 border border-slate-200 rounded-xl p-2.5 space-y-2">
             <div class="flex items-center justify-between">
-              <span class="text-[10px] font-black text-slate-500 uppercase tracking-wider">💰 Desglose de Conceptos</span>
+              <span class="text-[10px] font-black text-slate-500 uppercase tracking-wider">💰 Desglose (noches × precio factura)</span>
               <span class="text-[10px] font-bold bg-white text-slate-600 px-2 py-0.5 rounded border border-slate-200">${noches} noche(s)</span>
             </div>
-
-            <div class="grid grid-cols-2 sm:grid-cols-4 gap-1.5 text-[10.5px]">
-              <div class="bg-white border border-slate-200/80 rounded-lg px-2 py-1 flex flex-col justify-between">
-                <span class="text-slate-400 font-semibold text-[9.5px]">🛏️ Estadía</span>
-                <strong class="text-slate-900 font-black">S/ ${tarifaNoche.toFixed(2)}</strong>
-              </div>
-              <div class="bg-white border border-slate-200/80 rounded-lg px-2 py-1 flex flex-col justify-between">
-                <span class="text-slate-400 font-semibold text-[9.5px]">🧾 Adic. Comp.</span>
-                <strong class="${adicComp > 0 ? 'text-orange-600 font-black' : 'text-slate-600'}">S/ ${adicComp.toFixed(2)}</strong>
-              </div>
-              <div class="bg-white border border-slate-200/80 rounded-lg px-2 py-1 flex flex-col justify-between">
-                <span class="text-slate-400 font-semibold text-[9.5px]">🥤 Tienda</span>
-                <strong class="text-slate-700 font-bold">S/ ${adicSnacks.toFixed(2)}</strong>
-              </div>
-              <div class="bg-white border border-slate-200/80 rounded-lg px-2 py-1 flex flex-col justify-between">
-                <span class="text-slate-400 font-semibold text-[9.5px]">🛎️ Servicios</span>
-                <strong class="text-slate-700 font-bold">S/ ${adicServ.toFixed(2)}</strong>
-              </div>
-            </div>
-
+            <table class="w-full text-[10.5px] bg-white border border-slate-200 rounded-lg overflow-hidden">
+              <thead class="bg-slate-100 text-slate-500 text-[9.5px] uppercase">
+                <tr><th class="text-left px-2 py-1">Fechas</th><th class="text-center px-1">Noches</th><th class="text-right px-1">Precio x noche</th><th class="text-right px-2">Subtotal</th></tr>
+              </thead>
+              <tbody>
+                ${desgloseFilas.map((d, i) => `
+                  <tr class="border-t border-slate-100 ${i === desgloseFilas.length - 1 ? 'font-black text-slate-900' : 'text-slate-700'}">
+                    <td class="px-2 py-0.5">${d.checkIn} → ${d.checkOut}</td>
+                    <td class="text-center px-1">${d.noches}</td>
+                    <td class="text-right px-1">S/ <span ${i === desgloseFilas.length - 1 ? 'id="modalFact_precioFila"' : ''}>${Number(d.precio).toFixed(2)}</span>${d.precioEsFactura ? '' : ' <span class="text-slate-400 font-normal">(tarifa)</span>'}</td>
+                    <td class="text-right px-2">S/ <span ${i === desgloseFilas.length - 1 ? 'id="modalFact_subFila"' : ''}>${Number(d.subtotal).toFixed(2)}</span></td>
+                  </tr>`).join("")}
+              </tbody>
+            </table>
             <div class="flex justify-between items-center bg-slate-900 text-white px-3 py-1.5 rounded-lg">
               <span class="font-bold text-[10.5px] text-slate-300">🎯 Monto a emitir en ${tipoLabel}:</span>
-              <span class="font-black text-xs sm:text-sm ${esFact ? 'text-orange-300' : 'text-emerald-300'}">S/ ${montoSolicitado.toFixed(2)}</span>
+              <span class="font-black text-xs sm:text-sm ${esFact ? 'text-orange-300' : 'text-emerald-300'}">S/ <span id="modalFact_totalBarra">${montoSolicitado.toFixed(2)}</span></span>
             </div>
           </div>
 
@@ -3719,9 +3735,9 @@
 
             <div class="grid grid-cols-3 gap-1.5 text-[11px]">
               <div>
-                <label class="block text-[9.5px] font-black text-slate-700 mb-0.5">🎯 Monto Comp. (S/) *</label>
-                <input type="number" step="0.01" id="modalFact_monto" value="${montoSolicitado > 0 ? montoSolicitado : ''}"
-                       oninput="if(typeof onCambiarMontoCompModal==='function') onCambiarMontoCompModal(this.value)"
+                <label class="block text-[9.5px] font-black text-slate-700 mb-0.5" title="Precio por noche de esta estancia en la factura. Por defecto, la tarifa.">🎯 Precio factura x noche (S/) *</label>
+                <input type="number" step="0.01" id="modalFact_precioNoche" value="${precioFilaActual > 0 ? precioFilaActual : ''}"
+                       oninput="onCambiarPrecioFactModal(this.value)"
                        class="w-full border border-slate-300 rounded-md px-1.5 py-1 bg-white font-black text-slate-900 text-[11px]" />
               </div>
               <div>
@@ -4040,7 +4056,7 @@
       const selEstado = document.getElementById("modalFact_estado");
       const selTipo = document.getElementById("modalFact_tipo");
       const inpNro = document.getElementById("modalFact_nro");
-      const inpMonto = document.getElementById("modalFact_monto");
+      const inpMonto = document.getElementById("modalFact_precioNoche") || document.getElementById("modalFact_monto");
       const inpAdic = document.getElementById("modalFact_adicComp");
       const inpCel = document.getElementById("modalFact_celular");
       const cardEl = document.getElementById("popModalCard");
@@ -4087,7 +4103,7 @@
           return;
         }
         if (!(nuevoMonto > 0)) {
-          alert("⚠️ Indica el monto por el cual se hará la Factura.");
+          alert("⚠️ Indica el precio por noche de la Factura.");
           if (inpMonto) inpMonto.focus();
           return;
         }
@@ -4139,9 +4155,6 @@
           ruc: esFacturaNueva ? nuevoRuc : "",
           empresa: esFacturaNueva ? nuevaEmpresa : "",
           comprobantesStr: nuevoNro || f.comprobantesStr || "",
-          montoFacturado: nuevoMonto > 0 ? nuevoMonto : f.montoFacturado,
-          montoPorFacturar: nuevoMonto > 0 ? nuevoMonto : f.montoPorFacturar,
-          montoSolicitadoFact: nuevoMonto > 0 ? nuevoMonto : f.montoSolicitadoFact,
           adicComprobante: nuevoAdic !== undefined ? nuevoAdic : (f.adicComprobante || 0)
         });
         renderTabla();
