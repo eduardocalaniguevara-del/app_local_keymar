@@ -387,6 +387,42 @@
       color: var(--primary);
     }
 
+    /* Continuar Estancia: avisos y personas */
+    .cont-aviso {
+      display: none;
+      background: #fff7ed;
+      border: 1.5px solid #fdba74;
+      color: #9a3412;
+      border-radius: 8px;
+      padding: 8px 10px;
+      margin: 6px 0;
+      font-size: 12px;
+      font-weight: 600;
+      line-height: 1.4;
+    }
+    .cont-persona {
+      display: grid;
+      grid-template-columns: 18px 104px minmax(0, 1fr) auto auto;
+      gap: 5px;
+      align-items: center;
+      margin-bottom: 5px;
+    }
+    .cont-persona span { font-size: 12px; font-weight: 800; color: #475569; }
+    .cont-persona input { min-width: 0; }
+    .cont-persona button { padding: 0 9px; height: 100%; min-height: 30px; }
+    .cont-persona .cont-quitar { background: #b91c1c; }
+    .cont-persona button:disabled, .cont-add:disabled, #btnSubmitContinuar:disabled { opacity: 0.45; cursor: not-allowed; }
+    .cont-add {
+      background: #eef2ff;
+      border: 1px dashed #6366f1;
+      color: #3730a3;
+      border-radius: 6px;
+      padding: 5px 10px;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
     /* Summary Card for Continuar Estancia */
     .summary-card {
       background: #f0fdf4;
@@ -1009,6 +1045,8 @@
           </div>
         </div>
 
+        <div id="contAviso" class="cont-aviso" role="status" aria-live="polite"></div>
+
         <div id="resumenContinuarBox" class="summary-card" style="display: none;">
           <div class="summary-top">
             <div>
@@ -1038,7 +1076,7 @@
         </div>
       </fieldset>
 
-      <fieldset>
+      <fieldset id="contDatosNuevos" style="display: none;">
         <legend class="cont-legend">2. Datos para la Nueva Continuación</legend>
 
         <div class="grid-2">
@@ -1067,8 +1105,16 @@
             <input type="date" id="contFechaOut" required>
           </div>
         </div>
+
+        <div class="field">
+          <label>Personas en la habitación <span class="req">*</span></label>
+          <div id="contPersonas"></div>
+          <button type="button" id="btnAgregarPersona" class="cont-add">➕ Agregar persona</button>
+          <div id="contPersonasHint" class="prev-stay-hint"></div>
+        </div>
       </fieldset>
 
+      <div id="contBloqueo" class="cont-aviso" role="status" aria-live="polite"></div>
       <div id="statusBannerContinuar" class="status-banner" role="status" aria-live="polite"></div>
 
       <div class="actions">
@@ -1082,6 +1128,12 @@
     let MAPA_NOMBRES = {};
     let HABITACIONES = [];
     let ESTANCIAS_ACTIVAS = [];
+    let CONT_MOTIVOS = {};      // por habitación: por qué no se puede continuar
+    let CONT_OCUPACION = [];    // noches ocupadas, para ofrecer solo habitaciones libres
+    let CONT_ID_SEL = '';       // ID (columna A) de la estancia elegida
+    let CONT_EDITADO = false;   // true: no pisar lo escrito al refrescar
+    let CONT_HAB_DESEADA = '';
+    let CONT_PERSONAS = [];
     let FECHA_HOY = "";
     let FECHA_MANANA = "";
 
@@ -1106,6 +1158,7 @@
     });
 
     function mostrarBusquedaManualContinuar() {
+      window._ctxDrawerPendiente = null;
       const blq = document.getElementById('bloqueBusquedaManualCont');
       const btn = document.getElementById('btnMostrarBusquedaCont');
       if (blq) blq.style.display = 'block';
@@ -1653,6 +1706,8 @@
             DB_HUESPEDES = res.huespedes || {};
             HABITACIONES = res.habitaciones || [];
             ESTANCIAS_ACTIVAS = res.estanciasActivas || [];
+            CONT_MOTIVOS = res.continuarMotivos || {};
+            CONT_OCUPACION = res.ocupacion || [];
             FECHA_HOY = res.fechaHoy || "";
             FECHA_MANANA = res.fechaManana || "";
             EMPRESAS_CAT = res.empresasCatalogo || {};
@@ -1703,7 +1758,6 @@
     function renderizarHabitaciones(hotelesTercerizados) {
       const selCheckIn = habSelect.value;
       habSelect.innerHTML = '<option value="">-- Seleccionar Habitación --</option>';
-      contHabNueva.innerHTML = '<option value="">-- Habitación --</option>';
 
       const grpLibres = document.createElement('optgroup');
       grpLibres.label = '✅ HABITACIONES LIBRES';
@@ -1724,11 +1778,6 @@
           opt.textContent = `${h.hab} — ${h.tipo} [${h.estado}${ocupTxt}]`;
           grpOcupadas.appendChild(opt);
         }
-
-        const optC = document.createElement('option');
-        optC.value = h.hab;
-        optC.textContent = `${h.hab} — ${h.tipo}`;
-        contHabNueva.appendChild(optC);
       });
 
       if (grpLibres.children.length > 0) habSelect.appendChild(grpLibres);
@@ -1758,7 +1807,13 @@
         opt.textContent = `${est.hab} — ${est.nombre} (${est.fechaIn}${saldoTxt})`;
         estanciaActivaSelect.appendChild(opt);
       });
-      resumenContinuarBox.style.display = 'none';
+      // Mantener la estancia que ya estaba elegida (si sigue disponible)
+      const idxSel = ESTANCIAS_ACTIVAS.findIndex((e) => e.id === CONT_ID_SEL);
+      if (CONT_ID_SEL && idxSel !== -1) {
+        seleccionarEstancia(idxSel);
+      } else {
+        limpiarSeleccionContinuar('');
+      }
     }
 
     let ultimoDniAutocompletado = '';
@@ -2229,13 +2284,43 @@
       return `${d.getFullYear()}-${mm}-${dd}`;
     }
 
+    const contAviso = document.getElementById('contAviso');
+    const contBloqueo = document.getElementById('contBloqueo');
+    const contDatosNuevos = document.getElementById('contDatosNuevos');
+    const contPersonasBox = document.getElementById('contPersonas');
+    const contPersonasHint = document.getElementById('contPersonasHint');
+    const btnAgregarPersona = document.getElementById('btnAgregarPersona');
+    const btnSubmitContinuar = document.getElementById('btnSubmitContinuar');
+    const MAX_PERSONAS = 3;
+
+    function isoAYmd(iso) { return Number(String(iso || '').replace(/-/g, '')) || 0; }
+    function isoADmy(iso) { return String(iso || '').split('-').reverse().join('/'); }
+    function ymdADmy(ymd) { const s = String(ymd); return `${s.slice(6, 8)}/${s.slice(4, 6)}/${s.slice(0, 4)}`; }
+    function estanciaElegida() { return ESTANCIAS_ACTIVAS.find((e) => e.id === CONT_ID_SEL) || null; }
+
+    function mostrarCaja(el, texto) {
+      el.textContent = texto || '';
+      el.style.display = texto ? 'block' : 'none';
+    }
+
+    function limpiarSeleccionContinuar(motivo) {
+      CONT_ID_SEL = '';
+      CONT_EDITADO = false;
+      estanciaActivaSelect.value = '';
+      resumenContinuarBox.style.display = 'none';
+      contDatosNuevos.style.display = 'none';
+      mostrarCaja(contBloqueo, '');
+      mostrarCaja(contAviso, motivo);
+      btnSubmitContinuar.disabled = true;
+    }
+
     function seleccionarEstancia(idx) {
-      if (idx === '' || idx === null || !ESTANCIAS_ACTIVAS[idx]) {
-        resumenContinuarBox.style.display = 'none';
+      const est = (idx === '' || idx === null) ? null : ESTANCIAS_ACTIVAS[idx];
+      if (!est) {
+        limpiarSeleccionContinuar('');
         return;
       }
       estanciaActivaSelect.value = String(idx);
-      const est = ESTANCIAS_ACTIVAS[idx];
       document.getElementById('contNombre').textContent = est.nombre || '-';
       document.getElementById('contDni').textContent = est.dni || '-';
       const habBadge = document.getElementById('contHabBadge');
@@ -2254,46 +2339,241 @@
         saldoCol.className = saldoVal > 0 ? 'summary-col deuda-col-debe' : 'summary-col deuda-col-ok';
       }
 
-      // Valores por defecto EDITABLES: misma habitación, misma tarifa,
-      // nuevo Check-In = Check-Out anterior y nuevo Check-Out = +1 día
-      contHabNueva.value = est.hab;
-      contTarifaNueva.value = est.tarifa || '';
-      const isoOutAnterior = dmyAIso(est.fechaOut);
-      const nuevoIn = isoOutAnterior || FECHA_HOY;
-      contFechaIn.value = nuevoIn;
-      contFechaOut.value = nuevoIn ? sumarDiasIso(nuevoIn, 1) : FECHA_MANANA;
-
-      limpiarErroresVisuales(continuarForm);
+      mostrarCaja(contAviso, '');
       resumenContinuarBox.style.display = 'block';
+      contDatosNuevos.style.display = '';
+
+      if (CONT_ID_SEL !== est.id || !CONT_EDITADO) {
+        // Valores por defecto EDITABLES: misma habitación, tarifa y personas
+        CONT_ID_SEL = est.id;
+        CONT_EDITADO = false;
+        CONT_HAB_DESEADA = String(est.hab);
+        contTarifaNueva.value = est.tarifa || '';
+        contFechaIn.value = est.checkInNuevoISO;
+        contFechaOut.value = sumarDiasIso(est.checkInNuevoISO, 1);
+        CONT_PERSONAS = (est.personas || []).map((p) => ({ nombre: p.nombre || '', dni: p.dni || '' }));
+        if (!CONT_PERSONAS.length) CONT_PERSONAS = [{ nombre: '', dni: '' }];
+        limpiarErroresVisuales(continuarForm);
+        renderizarPersonas();
+      }
+      renderizarHabNueva();
+      validarContinuacion();
     }
 
+    // ---------- Habitación nueva: solo las libres en las fechas elegidas ----------
+    function ocupanteDe(hab, ymdIn, ymdOut, idOrigen) {
+      return CONT_OCUPACION.find((o) => String(o.hab) === String(hab) && o.id !== idOrigen
+        && o.ymdIn < ymdOut && o.ymdFin > ymdIn) || null;
+    }
+
+    function renderizarHabNueva() {
+      const est = estanciaElegida();
+      if (!est) return;
+      const ymdIn = isoAYmd(contFechaIn.value);
+      const ymdOut = isoAYmd(contFechaOut.value);
+      contHabNueva.innerHTML = '<option value="">-- Habitación libre --</option>';
+      let disponible = false;
+      HABITACIONES.forEach((h) => {
+        if (ymdIn && ymdOut > ymdIn && ocupanteDe(h.hab, ymdIn, ymdOut, est.id)) return;
+        const opt = document.createElement('option');
+        opt.value = h.hab;
+        opt.textContent = `${h.hab} — ${h.tipo}${String(h.hab) === String(est.hab) ? ' (actual)' : ''}`;
+        contHabNueva.appendChild(opt);
+        if (String(h.hab) === CONT_HAB_DESEADA) disponible = true;
+      });
+      contHabNueva.value = disponible ? CONT_HAB_DESEADA : '';
+    }
+
+    // ---------- Personas: quitar, editar o agregar (1 a 3) ----------
+    function renderizarPersonas() {
+      contPersonasBox.innerHTML = '';
+      CONT_PERSONAS.forEach((p, i) => {
+        const fila = document.createElement('div');
+        fila.className = 'cont-persona';
+
+        const num = document.createElement('span');
+        num.textContent = `${i + 1}.`;
+
+        const inpDni = document.createElement('input');
+        inpDni.type = 'text';
+        inpDni.maxLength = 15;
+        inpDni.placeholder = 'DNI';
+        inpDni.autocomplete = 'off';
+        inpDni.value = p.dni;
+        inpDni.setAttribute('aria-label', `DNI persona ${i + 1}`);
+
+        const inpNom = document.createElement('input');
+        inpNom.type = 'text';
+        inpNom.placeholder = i === 0 ? 'Nombre del titular' : 'Nombre del acompañante';
+        inpNom.autocomplete = 'off';
+        inpNom.setAttribute('list', 'listaClientesNombres');
+        inpNom.value = p.nombre;
+        inpNom.setAttribute('aria-label', `Nombre persona ${i + 1}`);
+
+        const btnBuscar = document.createElement('button');
+        btnBuscar.type = 'button';
+        btnBuscar.className = 'btn-reniec';
+        btnBuscar.textContent = '🔍';
+        btnBuscar.title = 'Buscar DNI (padrón o RENIEC)';
+
+        const btnQuitar = document.createElement('button');
+        btnQuitar.type = 'button';
+        btnQuitar.className = 'btn-reniec cont-quitar';
+        btnQuitar.textContent = '✕';
+        btnQuitar.disabled = CONT_PERSONAS.length === 1;
+        btnQuitar.title = btnQuitar.disabled ? 'Debe quedar al menos una persona' : 'Quitar de la habitación';
+
+        const aplicar = () => {
+          p.dni = inpDni.value.trim();
+          p.nombre = inpNom.value;
+          CONT_EDITADO = true;
+          validarContinuacion();
+        };
+        inpDni.addEventListener('input', () => {
+          const ficha = DB_HUESPEDES[inpDni.value.trim()];
+          if (ficha && ficha.nombre) inpNom.value = ficha.nombre;
+          aplicar();
+        });
+        inpNom.addEventListener('input', () => {
+          const dniEnc = MAPA_NOMBRES[inpNom.value.trim().toUpperCase()];
+          if (dniEnc) inpDni.value = dniEnc;
+          aplicar();
+        });
+        btnBuscar.addEventListener('click', () => {
+          const dni = inpDni.value.replace(/\D/g, '');
+          if (dni.length !== 8) {
+            mostrarCajaPersonas('⚠️ Para buscar, escribe un DNI de 8 dígitos.');
+            return;
+          }
+          mostrarCajaPersonas('🔍 Consultando...');
+          google.script.run
+            .withSuccessHandler((res) => {
+              if (res && res.ok && res.nombre) {
+                inpNom.value = res.nombre;
+                aplicar();
+                mostrarCajaPersonas(`✓ ${res.nombre}`);
+              } else {
+                mostrarCajaPersonas('⚠️ DNI no encontrado. Escribe el nombre.');
+              }
+            })
+            .withFailureHandler(() => mostrarCajaPersonas('⚠️ No se pudo consultar. Escribe el nombre.'))
+            .consultarDniReniec(dni);
+        });
+        btnQuitar.addEventListener('click', () => {
+          CONT_PERSONAS.splice(i, 1);
+          CONT_EDITADO = true;
+          renderizarPersonas();
+          validarContinuacion();
+        });
+
+        fila.append(num, inpDni, inpNom, btnBuscar, btnQuitar);
+        contPersonasBox.appendChild(fila);
+      });
+      btnAgregarPersona.disabled = CONT_PERSONAS.length >= MAX_PERSONAS;
+      mostrarCajaPersonas(CONT_PERSONAS.length >= MAX_PERSONAS
+        ? 'Máximo 3 personas: la hoja solo tiene columnas para 3.'
+        : (CONT_PERSONAS.length === 1 ? 'Debe quedar al menos una persona.' : 'La persona 1 es el titular.'));
+    }
+
+    function mostrarCajaPersonas(texto) {
+      contPersonasHint.textContent = texto;
+      contPersonasHint.classList.add('visible');
+    }
+
+    btnAgregarPersona.addEventListener('click', () => {
+      if (CONT_PERSONAS.length >= MAX_PERSONAS) return;
+      CONT_PERSONAS.push({ nombre: '', dni: '' });
+      CONT_EDITADO = true;
+      renderizarPersonas();
+      validarContinuacion();
+    });
+
+    // ---------- Validación en vivo: si algo no se puede, se explica y no se acepta ----------
+    function motivoBloqueoContinuar() {
+      const est = estanciaElegida();
+      if (!est) return '';
+      const inicio = est.checkInNuevoISO;
+      if (!contFechaIn.value || !contFechaOut.value) return 'Completa el nuevo Check-In y Check-Out.';
+      if (contFechaIn.value < inicio) {
+        return `El nuevo Check-In no puede ser antes del ${isoADmy(inicio)}: la estancia actual llega hasta ese día y la noche se cobraría dos veces. Para acortarla, edita primero su Check-Out con el lápiz.`;
+      }
+      if (contFechaIn.value > inicio) {
+        return `Una continuación empieza el ${isoADmy(inicio)}. Si el huésped dejó noches sin quedarse, corresponde un Check-In nuevo.`;
+      }
+      if (contFechaOut.value <= contFechaIn.value) return 'El nuevo Check-Out debe ser posterior al nuevo Check-In.';
+      if (!contHabNueva.value) {
+        const o = ocupanteDe(CONT_HAB_DESEADA, isoAYmd(contFechaIn.value), isoAYmd(contFechaOut.value), est.id);
+        return o
+          ? `La Hab. ${CONT_HAB_DESEADA} está ocupada por ${o.huesped} (${ymdADmy(o.ymdIn)} → ${ymdADmy(o.ymdFin)}). Elige otra habitación libre.`
+          : 'Elige una habitación libre.';
+      }
+      if (!(parseFloat(String(contTarifaNueva.value).replace(',', '.')) > 0)) return 'Ingresa la tarifa por noche.';
+      const llenas = CONT_PERSONAS.filter((p) => p.nombre.trim() || p.dni.trim());
+      if (!llenas.length) return 'Debe quedar al menos una persona en la habitación.';
+      if (llenas.some((p) => !p.nombre.trim())) return 'Hay una persona con DNI pero sin nombre.';
+      return '';
+    }
+
+    function validarContinuacion() {
+      const motivo = motivoBloqueoContinuar();
+      mostrarCaja(contBloqueo, motivo);
+      btnSubmitContinuar.disabled = !estanciaElegida() || Boolean(motivo);
+      return motivo;
+    }
+
+    contFechaIn.addEventListener('change', () => {
+      CONT_EDITADO = true;
+      if (contFechaIn.value && contFechaOut.value <= contFechaIn.value) {
+        contFechaOut.value = sumarDiasIso(contFechaIn.value, 1);
+      }
+      renderizarHabNueva();
+      validarContinuacion();
+    });
+    contFechaOut.addEventListener('change', () => {
+      CONT_EDITADO = true;
+      renderizarHabNueva();
+      validarContinuacion();
+    });
+    contHabNueva.addEventListener('change', () => {
+      CONT_EDITADO = true;
+      CONT_HAB_DESEADA = contHabNueva.value;
+      validarContinuacion();
+    });
+    contTarifaNueva.addEventListener('input', () => {
+      CONT_EDITADO = true;
+      validarContinuacion();
+    });
+
     estanciaActivaSelect.addEventListener('change', () => {
-      seleccionarEstancia(estanciaActivaSelect.value);
-      const est = ESTANCIAS_ACTIVAS[estanciaActivaSelect.value];
+      window._ctxDrawerPendiente = null;
+      const idx = estanciaActivaSelect.value;
+      const est = idx === '' ? null : ESTANCIAS_ACTIVAS[idx];
       contHabBuscar.value = est ? est.hab : '';
       contBuscarHint.classList.remove('visible');
+      seleccionarEstancia(idx);
     });
+
+    function indicesDeHab(hab) {
+      return ESTANCIAS_ACTIVAS.reduce((acc, e, i) => (String(e.hab).trim() === hab ? acc.concat(i) : acc), []);
+    }
+
+    function motivoSinCandidata(hab) {
+      return CONT_MOTIVOS[hab] || `La Hab. ${hab} no tiene una estancia que continuar.`;
+    }
 
     // Búsqueda instantánea al digitar el número de habitación (ej. 103)
     contHabBuscar.addEventListener('input', () => {
+      window._ctxDrawerPendiente = null;
       const val = contHabBuscar.value.trim();
       contBuscarHint.classList.remove('visible');
-      if (!val) {
-        estanciaActivaSelect.value = '';
-        resumenContinuarBox.style.display = 'none';
-        return;
-      }
-      const idx = ESTANCIAS_ACTIVAS.findIndex((e) => String(e.hab).trim() === val);
-      if (idx !== -1) {
-        seleccionarEstancia(idx);
+      const lista = val ? indicesDeHab(val) : [];
+      if (lista.length === 1) {
+        seleccionarEstancia(lista[0]);
+      } else if (lista.length > 1) {
+        limpiarSeleccionContinuar(`La Hab. ${val} tiene ${lista.length} estancias vigentes. Elige cuál en la lista.`);
       } else {
-        estanciaActivaSelect.value = '';
-        resumenContinuarBox.style.display = 'none';
-        // Solo avisamos cuando el número ya tiene 3 dígitos (evita avisos mientras escribe "1", "10"...)
-        if (val.length >= 3) {
-          contBuscarHint.textContent = `⚠️ La Hab. ${val} no tiene una estancia "En Curso".`;
-          contBuscarHint.classList.add('visible');
-        }
+        // Se avisa cuando el número ya está completo (3 dígitos)
+        limpiarSeleccionContinuar(val.length >= 3 ? motivoSinCandidata(val) : '');
       }
     });
 
@@ -2306,18 +2586,9 @@
 
     continuarForm.addEventListener('submit', (e) => {
       e.preventDefault();
+      const est = estanciaElegida();
+      if (!est || validarContinuacion()) return;
       if (!validarCamposRequeridos(continuarForm)) return;
-
-      const idx = estanciaActivaSelect.value;
-      const est = ESTANCIAS_ACTIVAS[idx];
-      if (!est) return;
-
-      if (contFechaIn.value && contFechaOut.value && contFechaOut.value <= contFechaIn.value) {
-        contFechaOut.classList.add('campo-invalido');
-        contFechaOut.focus();
-        mostrarBanner('error', '⚠️ El nuevo Check-Out debe ser posterior al nuevo Check-In.');
-        return;
-      }
 
       const payloadCont = {
         estanciaUuid: est.estanciaUuid || '',
@@ -2328,15 +2599,19 @@
         dniAnterior: est.dni || '',
         huespedAnterior: est.nombre || '',
         habNueva: contHabNueva.value,
-        tarifaNueva: parseFloat(contTarifaNueva.value) || Number(est.tarifa) || 0,
+        tarifaNueva: parseFloat(String(contTarifaNueva.value).replace(',', '.')),
         fechaInNueva: contFechaIn.value,
         fechaOutNueva: contFechaOut.value,
+        personas: CONT_PERSONAS
+          .map((p) => ({ nombre: p.nombre.trim(), dni: p.dni.trim() }))
+          .filter((p) => p.nombre || p.dni),
         deudaArrastre: Number(est.saldo) || 0
       };
 
       // Quitar de la lista local para evitar doble continuación por doble clic
       window._ctxDrawerPendiente = null;
-      ESTANCIAS_ACTIVAS.splice(Number(idx), 1);
+      ESTANCIAS_ACTIVAS.splice(ESTANCIAS_ACTIVAS.indexOf(est), 1);
+      CONT_ID_SEL = '';
       renderizarEstanciasActivas();
       contHabBuscar.value = '';
       contBuscarHint.classList.remove('visible');
@@ -2351,7 +2626,7 @@
             }
           })
           .withFailureHandler((err) => {
-            mostrarBanner('error', `❌ Error al continuar estancia: ${err.message || err}`);
+            mostrarBanner('error', `❌ No se continuó: ${err.message || err}`);
             cargarDatosServidor();
           })
           .continuarEstanciaDesdeApp(payloadCont);
@@ -2374,39 +2649,37 @@
       }
       if (ctx.tab === 'continuar') {
         tabBtnContinuar.click();
-        estanciaActivaSelect.value = '';
-        contHabBuscar.value = '';
-        resumenContinuarBox.style.display = 'none';
         const hab = String(ctx.hab || '').trim();
-        const checkInCtx = String(ctx.checkIn || '').trim();
-        if (hab && ESTANCIAS_ACTIVAS && ESTANCIAS_ACTIVAS.length > 0) {
-          let idx = -1;
-          if (checkInCtx) {
-            idx = ESTANCIAS_ACTIVAS.findIndex((e) => String(e.hab).trim() === hab && String(e.fechaIn || '').trim() === checkInCtx);
-          }
-          if (idx === -1 && ctx.estanciaUuid) {
-            idx = ESTANCIAS_ACTIVAS.findIndex((e) => String(e.hab).trim() === hab && e.estanciaUuid && String(e.estanciaUuid) === String(ctx.estanciaUuid));
-          }
-          if (idx === -1 && ctx.idEstancia) {
-            idx = ESTANCIAS_ACTIVAS.findIndex((e) => String(e.hab).trim() === hab && e.id && String(e.id) === String(ctx.idEstancia));
-          }
-          if (idx === -1) {
-            idx = ESTANCIAS_ACTIVAS.findIndex((e) => String(e.hab).trim() === hab);
-          }
-          if (idx !== -1) {
-            contHabBuscar.value = hab;
-            contBuscarHint.classList.remove('visible');
+        const blq = document.getElementById('bloqueBusquedaManualCont');
+        const btnM = document.getElementById('btnMostrarBusquedaCont');
+        const verBusqueda = (ver) => {
+          if (blq) blq.style.display = ver ? 'block' : 'none';
+          if (btnM) btnM.style.display = ver ? 'none' : 'inline';
+        };
+        contHabBuscar.value = hab;
+        contBuscarHint.classList.remove('visible');
+        if (!hab) {
+          limpiarSeleccionContinuar('');
+          verBusqueda(true);
+        } else if (!desdeCargaServidor) {
+          // Esperar datos frescos del día visto antes de mostrar nada
+          limpiarSeleccionContinuar('⏳ Cargando la estancia...');
+          verBusqueda(false);
+        } else {
+          // La estancia que muestra el panel; si no aplica, solo se toma otra cuando es la única válida
+          const lista = indicesDeHab(hab);
+          let idx = lista.find((i) => String(ESTANCIAS_ACTIVAS[i].id) === String(ctx.idEstancia || ''));
+          if (idx === undefined && lista.length === 1) idx = lista[0];
+          if (idx !== undefined) {
+            verBusqueda(false);
             seleccionarEstancia(idx);
-            const blq = document.getElementById('bloqueBusquedaManualCont');
-            const btnM = document.getElementById('btnMostrarBusquedaCont');
-            if (blq) blq.style.display = 'none';
-            if (btnM) btnM.style.display = 'inline';
+          } else if (lista.length > 1) {
+            limpiarSeleccionContinuar(`La Hab. ${hab} tiene ${lista.length} estancias vigentes. Elige cuál en la lista.`);
+            verBusqueda(true);
           } else {
-            contHabBuscar.value = hab;
-            mostrarBusquedaManualContinuar();
+            limpiarSeleccionContinuar(motivoSinCandidata(hab));
+            verBusqueda(false);
           }
-        } else if (!hab) {
-          mostrarBusquedaManualContinuar();
         }
       } else if (ctx.tab === 'checkin') {
         tabBtnCheckIn.click();
